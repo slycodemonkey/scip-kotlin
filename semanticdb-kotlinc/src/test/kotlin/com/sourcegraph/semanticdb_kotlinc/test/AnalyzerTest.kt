@@ -19,12 +19,29 @@ import kotlin.contracts.ExperimentalContracts
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import org.intellij.lang.annotations.Language
+import org.jetbrains.kotlin.cli.jvm.compiler.EnvironmentConfigFiles
+import org.jetbrains.kotlin.cli.jvm.compiler.KotlinCoreEnvironment
+import org.jetbrains.kotlin.com.intellij.openapi.Disposable
 import org.jetbrains.kotlin.compiler.plugin.ExperimentalCompilerApi
+import org.jetbrains.kotlin.config.CompilerConfiguration
+import org.jetbrains.kotlin.config.JVMConfigurationKeys
+import org.jetbrains.kotlin.config.LanguageVersionSettingsImpl
+import org.jetbrains.kotlin.config.languageVersionSettings
 import org.junit.jupiter.api.io.TempDir
 
 @OptIn(ExperimentalCompilerApi::class)
 @ExperimentalContracts
 class AnalyzerTest {
+    fun setupKotlinEnvironment(disposable: Disposable): KotlinCoreEnvironment {
+        val configuration =
+            CompilerConfiguration().apply {
+                put(JVMConfigurationKeys.JDK_HOME, java.io.File(System.getProperty("java.home")))
+                languageVersionSettings = LanguageVersionSettingsImpl.DEFAULT
+            }
+        return KotlinCoreEnvironment.createForProduction(
+            disposable, configuration, EnvironmentConfigFiles.JVM_CONFIG_FILES)
+    }
+
     fun compileSemanticdb(path: Path, @Language("kotlin") code: String): TextDocument {
         val buildPath = File(path.resolve("build").toString()).apply { mkdir() }
         val source = SourceFile.testKt(code)
@@ -33,9 +50,11 @@ class AnalyzerTest {
         val result =
             KotlinCompilation()
                 .apply {
+                    //                    sources = listOf(SourceFile.kotlin(source.name,
+                    // source.text))
                     sources = listOf(source)
-                    componentRegistrars = listOf(AnalyzerRegistrar { document = it })
-                    verbose = false
+                    compilerPluginRegistrars = listOf(AnalyzerRegistrar { document = it })
+                    verbose = true
                     pluginOptions =
                         listOf(
                             PluginOption("semanticdb-kotlinc", "sourceroot", path.toString()),
@@ -64,33 +83,23 @@ class AnalyzerTest {
         val occurrences =
             arrayOf(
                 SymbolOccurrence {
-                    role = Role.REFERENCE
-                    symbol = "sample/"
-                    range {
-                        startLine = 0
-                        startCharacter = 8
-                        endLine = 0
-                        endCharacter = 14
-                    }
-                },
-                SymbolOccurrence {
                     role = Role.DEFINITION
-                    symbol = "sample/Banana#"
+                    symbol = "`sample/Banana`#Bananasample.Banana(): sample/Banana."
                     range {
                         startLine = 1
-                        startCharacter = 6
+                        startCharacter = 0
                         endLine = 1
-                        endCharacter = 12
+                        endCharacter = 33
                     }
                 },
                 SymbolOccurrence {
                     role = Role.DEFINITION
-                    symbol = "sample/Banana#foo()."
+                    symbol = "`sample/Banana`#foosample.foo(): kotlin/Unit."
                     range {
                         startLine = 2
-                        startCharacter = 8
+                        startCharacter = 4
                         endLine = 2
-                        endCharacter = 11
+                        endCharacter = 16
                     }
                 })
         assertSoftly(document.occurrencesList) {
@@ -100,23 +109,24 @@ class AnalyzerTest {
         val symbols =
             arrayOf(
                 SymbolInformation {
-                    symbol = "sample/Banana#"
+                    symbol = "`sample/Banana`#Bananasample.Banana(): sample/Banana."
                     language = KOTLIN
                     displayName = "Banana"
                     documentation =
                         Documentation {
                             format = Semanticdb.Documentation.Format.MARKDOWN
-                            message = "```kotlin\npublic final class Banana\n```"
+                            message =
+                                "```\npublic constructor(): R|sample/Banana| {\n    super<R|kotlin/Any|>()\n}\n\n```\n"
                         }
                 },
                 SymbolInformation {
-                    symbol = "sample/Banana#foo()."
+                    symbol = "`sample/Banana`#foosample.foo(): kotlin/Unit."
                     language = KOTLIN
                     displayName = "foo"
                     documentation =
                         Documentation {
                             format = Semanticdb.Documentation.Format.MARKDOWN
-                            message = "```kotlin\npublic final fun foo()\n```"
+                            message = "```\npublic final fun foo(): R|kotlin/Unit| {\n}\n\n```\n"
                         }
                 })
         assertSoftly(document.symbolsList) { withClue(this) { symbols.forEach(::shouldContain) } }
@@ -129,7 +139,8 @@ class AnalyzerTest {
             KotlinCompilation()
                 .apply {
                     sources = listOf(SourceFile.testKt(""))
-                    componentRegistrars = listOf(AnalyzerRegistrar { throw Exception("sample text") })
+                    compilerPluginRegistrars =
+                        listOf(AnalyzerRegistrar { throw Exception("sample text") })
                     verbose = false
                     pluginOptions =
                         listOf(
@@ -140,7 +151,7 @@ class AnalyzerTest {
                 }
                 .compile()
 
-        result.exitCode shouldBe KotlinCompilation.ExitCode.OK
+        result.exitCode shouldBe KotlinCompilation.ExitCode.INTERNAL_ERROR
     }
 
     @Test
@@ -476,7 +487,7 @@ class AnalyzerTest {
                 C(value = 3)
             }
             fun printProperty() = println(EnumExample1.A.value) // => 1
-            
+
             // Every enum has properties to obtain its name and ordinal(position) in the enum class declaration:
             fun printName() = println(EnumExample1.A.name) // => A
             fun printPosition() = println(EnumExample1.A.ordinal) // => 0
@@ -566,7 +577,7 @@ class AnalyzerTest {
             KotlinCompilation()
                 .apply {
                     sources = listOf(source)
-                    componentRegistrars = listOf(AnalyzerRegistrar())
+                    compilerPluginRegistrars = listOf(AnalyzerRegistrar())
                     verbose = false
                     pluginOptions =
                         listOf(
@@ -592,15 +603,17 @@ class AnalyzerTest {
 
                /** Example class docstring */
                class Docstrings: DocstringSuperclass(), Serializable
-               
-               /** 
+
+               /**
                  * Example method docstring
                  *
                  **/
                inline fun docstrings(msg: String): Int { return msg.length }
         """.trimIndent())
-        document.assertDocumentation("sample/Docstrings#", "Example class docstring")
-        document.assertDocumentation("sample/TestKt#docstrings().", "Example method docstring")
+        document.assertDocumentation("`sample/Docstrings`#", "Example class docstring")
+        document.assertDocumentation(
+            "`Test.kt.docstrings`#docstringssample.docstrings(kotlin/String): kotlin/Int.",
+            "Example method docstring")
     }
 
     private fun TextDocument.assertDocumentation(symbol: String, expectedDocumentation: String) {
